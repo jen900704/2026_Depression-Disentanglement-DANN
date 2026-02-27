@@ -1,5 +1,5 @@
 """
-File — Huang + SLS（無 DANN，Fine-tune Transformer，Scenario A）
+File — Huang + SLS（無 DANN，Fine-tune Transformer，Scenario B）
 ===============================================================
 架構說明：
   - Wav2Vec2 CNN：凍結
@@ -53,8 +53,8 @@ from sklearn.metrics import (
 # ============================================================
 #  設定區
 # ============================================================
-TRAIN_CSV  = "./experiment_sisman_scientific/scenario_A_screening/train.csv"
-TEST_CSV   = "./experiment_sisman_scientific/scenario_A_screening/test.csv"
+TRAIN_CSV  = "./experiment_sisman_scientific/scenario_A_monitoring/train.csv"
+TEST_CSV   = "./experiment_sisman_scientific/scenario_A_monitoring/test.csv"
 AUDIO_ROOT = "/export/fs05/hyeh10/depression/daic_5utt_full/merged_5"
 
 MODEL_NAME = "facebook/wav2vec2-base"
@@ -285,7 +285,7 @@ def full_evaluation(trainer, test_dataset, output_dir, run_i):
     plt.plot([0, 1], [0, 1], color="navy", lw=2, linestyle="--")
     plt.xlim([0, 1]); plt.ylim([0, 1.05])
     plt.xlabel("FPR"); plt.ylabel("TPR")
-    plt.title(f"ROC - Huang+SLS Scenario A Run {run_i}")
+    plt.title(f"ROC - Huang+SLS Scenario B Run {run_i}")
     plt.legend(); plt.savefig(os.path.join(results_path, "roc_curve.png")); plt.close()
 
     acc = accuracy_score(y_true, y_pred)
@@ -299,7 +299,7 @@ def full_evaluation(trainer, test_dataset, output_dir, run_i):
 # ============================================================
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 Huang + SLS（無 DANN，Fine-tune Transformer）— Scenario A")
+    print("🚀 Huang + SLS（無 DANN，Fine-tune Transformer）— Scenario B")
     print("   CNN：凍結 | Transformer：可訓練 | 無 DANN | Pooling：mean")
     print(f"   SEED={SEED} | LR={LEARNING_RATE} | Epochs={NUM_EPOCHS} | Runs={TOTAL_RUNS}")
     print("=" * 60)
@@ -403,7 +403,7 @@ if __name__ == "__main__":
 
     # ── 跨 run 統計 ──────────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"📈 Scenario A Huang+SLS — {TOTAL_RUNS} 次實驗彙總")
+    print(f"📈 Scenario B Huang+SLS — {TOTAL_RUNS} 次實驗彙總")
     print(f"{'='*60}")
     if all_results:
         results_df = pd.DataFrame(all_results)
@@ -415,4 +415,4 @@ if __name__ == "__main__":
         results_df.to_csv(os.path.join(OUTPUT_DIR, "summary_5runs.csv"), index=False)
         print(f"\n✅ 彙總已儲存至 {OUTPUT_DIR}/summary_5runs.csv")
 
-    print("\n🏁 Scenario A 完成！")
+    print("\n🏁 Scenario B 完成！")
