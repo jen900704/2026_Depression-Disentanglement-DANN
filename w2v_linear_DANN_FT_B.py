@@ -34,8 +34,8 @@ from packaging import version
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix, roc_curve, auc, mean_squared_error
 
 # ================= 參數設定區 (Scenario B) =================
-TRAIN_CSV  = "./experiment_sisman_scientific/scenario_B_screening/train.csv"
-TEST_CSV   = "./experiment_sisman_scientific/scenario_B_screening/test.csv"
+TRAIN_CSV  = "./experiment_sisman_scientific/scenario_B_monitoring/train.csv"
+TEST_CSV   = "./experiment_sisman_scientific/scenario_B_monitoring/test.csv"
 AUDIO_ROOT = "/export/fs05/hyeh10/depression/daic_5utt_full/merged_5"
 MODEL_NAME = "facebook/wav2vec2-base"
 OUTPUT_DIR = "./output_dann_finetune_B_linear"

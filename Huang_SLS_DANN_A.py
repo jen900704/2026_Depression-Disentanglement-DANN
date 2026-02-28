@@ -53,8 +53,8 @@ from sklearn.metrics import (
 # ============================================================
 #  設定區
 # ============================================================
-TRAIN_CSV  = "./experiment_sisman_scientific/scenario_A_monitoring/train.csv"
-TEST_CSV   = "./experiment_sisman_scientific/scenario_A_monitoring/test.csv"
+TRAIN_CSV  = "./experiment_sisman_scientific/scenario_A_screening/train.csv"
+TEST_CSV   = "./experiment_sisman_scientific/scenario_A_screening/test.csv"
 AUDIO_ROOT = "/export/fs05/hyeh10/depression/daic_5utt_full/merged_5"
 
 MODEL_NAME = "facebook/wav2vec2-base"

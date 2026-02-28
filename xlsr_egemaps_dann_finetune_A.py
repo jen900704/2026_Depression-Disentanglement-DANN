@@ -473,7 +473,6 @@ if __name__ == "__main__":
 
         print("⚔️ 開始訓練...")
         try:
-    import torch; torch.cuda.empty_cache()
             trainer.train()
         except RuntimeError as e:
             if "out of memory" in str(e):
