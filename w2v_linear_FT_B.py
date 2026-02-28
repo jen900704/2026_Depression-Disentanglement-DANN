@@ -81,9 +81,9 @@ PER_DEVICE_EVAL_BATCH_SIZE   = 1
 GRADIENT_ACCUMULATION_STEPS  = 8
 FP16                         = torch.cuda.is_available()
 # ▼ v3 修正：eval 頻率降低 10 倍，大幅縮短總訓練時間
-EVAL_STEPS                   = 100
-SAVE_STEPS                   = 100
-LOGGING_STEPS                = 50
+EVAL_STEPS                   = 10
+SAVE_STEPS                   = 10
+LOGGING_STEPS                = 10
 SAVE_TOTAL_LIMIT             = 2
 
 TOTAL_RUNS = 5  # 五次實驗取平均

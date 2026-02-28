@@ -374,7 +374,7 @@ if __name__ == "__main__":
 
         # ✅ 無 valid split，直接用完整 train
         train_dataset = train_dataset_full
-        eval_dataset  = test_dataset
+
         print(f"📊 Train: {len(train_dataset)} | Test(eval): {len(test_dataset)}")
 
         config = Wav2Vec2Config.from_pretrained(MODEL_NAME, num_labels=2, num_speakers=num_speakers, final_dropout=0.1)
@@ -402,7 +402,7 @@ if __name__ == "__main__":
             learning_rate=LEARNING_RATE,
             save_total_limit=SAVE_TOTAL_LIMIT,
             label_names=["labels"],
-            dataloader_drop_last=True,
+
             seed=run_seed,
             data_seed=run_seed,
             load_best_model_at_end=True,
@@ -416,7 +416,7 @@ if __name__ == "__main__":
             args=training_args,
             compute_metrics=compute_metrics,
             train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
+            eval_dataset=test_dataset,
             tokenizer=processor,
         )
 

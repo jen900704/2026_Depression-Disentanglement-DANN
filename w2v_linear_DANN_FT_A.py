@@ -252,8 +252,10 @@ if __name__ == "__main__":
             raise e
             
         trainer.save_model(os.path.join(OUTPUT_DIR, f"run_{run_i}", "best_model"))
+        pth_path = os.path.join(OUTPUT_DIR, f"w2v_dann_ft_A_shared_encoder_run_{run_i}.pth")
+        torch.save(trainer.model.spk_classifier.state_dict(), pth_path)
         all_results.append(full_evaluation(trainer, test_dataset, OUTPUT_DIR, run_i))
         del model, trainer; torch.cuda.empty_cache(); gc.collect()
 
     if all_results:
-        pd.DataFrame(all_results).to_csv(os.path.join(OUTPUT_DIR, "summary.csv"), index=False)
+        pd.DataFrame(all_results).to_csv(os.path.join(OUTPUT_DIR, "summary_5runs.csv"), index=False)

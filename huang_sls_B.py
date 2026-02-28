@@ -54,9 +54,9 @@ NUM_EPOCHS       = 10
 LEARNING_RATE    = 1e-4
 BATCH_SIZE       = 4
 GRAD_ACCUM       = 2
-EVAL_STEPS       = 50
-SAVE_STEPS       = 50
-LOGGING_STEPS    = 50
+EVAL_STEPS       = 10
+SAVE_STEPS       = 10
+LOGGING_STEPS    = 10
 SAVE_TOTAL_LIMIT = 2
 FP16             = torch.cuda.is_available()
 
@@ -275,7 +275,7 @@ if __name__ == "__main__":
     all_results = []
     for run_i in range(1, TOTAL_RUNS + 1):
         print(f"\n{'='*60}\n🎬 Run {run_i} / {TOTAL_RUNS}\n{'='*60}")
-        set_seed(SEED + run_i)
+        set_seed(SEED + run_i - 1)
 
         print(f"📊 Train: {len(train_dataset_full)} | Test(eval): {len(test_dataset)}")
 
@@ -305,8 +305,8 @@ if __name__ == "__main__":
             logging_steps=LOGGING_STEPS,
             learning_rate=LEARNING_RATE,
             save_total_limit=SAVE_TOTAL_LIMIT,
-            seed=SEED + run_i,
-            data_seed=SEED + run_i,
+            seed=SEED + run_i - 1,
+            data_seed=SEED + run_i - 1,
             load_best_model_at_end=True,
             report_to="none",
             remove_unused_columns=False,

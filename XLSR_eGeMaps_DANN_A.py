@@ -543,7 +543,7 @@ if __name__ == "__main__":
         run_output_dir = os.path.join(OUTPUT_DIR, f"run_{run_i}")
         os.makedirs(run_output_dir, exist_ok=True)
 
-        training_args = TrainingArguments(dataloader_drop_last=True, 
+        training_args = TrainingArguments(
             output_dir=run_output_dir,
             per_device_train_batch_size=BATCH_SIZE,
             label_names=["labels"],

@@ -60,9 +60,9 @@ NUM_EPOCHS       = 10
 LEARNING_RATE    = 1e-5  # fine-tune 標準 LR
 BATCH_SIZE = 1
 GRAD_ACCUM = 4
-EVAL_STEPS       = 50
-SAVE_STEPS       = 50
-LOGGING_STEPS    = 50
+EVAL_STEPS       = 10
+SAVE_STEPS       = 10
+LOGGING_STEPS    = 10
 SAVE_TOTAL_LIMIT = 2
 FP16             = torch.cuda.is_available()
 
@@ -416,10 +416,10 @@ if __name__ == "__main__":
 
     for run_i in range(1, TOTAL_RUNS + 1):
         print(f"\n{'='*60}\n🎬 Run {run_i} / {TOTAL_RUNS}\n{'='*60}")
-        set_seed(SEED + run_i)
+        set_seed(SEED + run_i - 1)
 
         train_dataset = train_dataset_full
-        eval_dataset  = test_dataset
+
         print(f"📊 Train: {len(train_dataset)} | Test(eval): {len(test_dataset)}")
 
         config = Wav2Vec2Config.from_pretrained(
@@ -436,7 +436,7 @@ if __name__ == "__main__":
         run_output_dir = os.path.join(OUTPUT_DIR, f"run_{run_i}")
         os.makedirs(run_output_dir, exist_ok=True)
 
-        training_args = TrainingArguments(dataloader_drop_last=True, 
+        training_args = TrainingArguments(
             output_dir=run_output_dir,
             per_device_train_batch_size=BATCH_SIZE,
             label_names=["labels"],
@@ -452,10 +452,9 @@ if __name__ == "__main__":
             logging_steps=LOGGING_STEPS,
             learning_rate=LEARNING_RATE,
             save_total_limit=SAVE_TOTAL_LIMIT,
-            seed=SEED + run_i,
-            data_seed=SEED + run_i,
+            seed=SEED + run_i - 1,
+            data_seed=SEED + run_i - 1,
             load_best_model_at_end=True,
-            metric_for_best_model="f1",
             greater_is_better=True,
             remove_unused_columns=False,
             report_to="none",
@@ -467,7 +466,7 @@ if __name__ == "__main__":
             args=training_args,
             compute_metrics=compute_metrics,
             train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
+            eval_dataset=test_dataset,
             tokenizer=processor,
         )
 
