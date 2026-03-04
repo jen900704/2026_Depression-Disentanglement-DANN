@@ -1,14 +1,12 @@
 """
 XLS-R + eGeMAPS + DANN（Fine-tune Transformer，Scenario A）
 ===========================================================
-與 xlsr_egemaps_dann_B.py（無 fine-tune）的差異：
-  - XLS-R 的 CNN 凍結，Transformer 可訓練
-  - LR 從 1e-4 降至 1e-5
-  - Scenario A：speaker map 從 train 建立（~151 位路人），
-    test 38 位陌生人 speaker_label = -1（不參與 L_spk）
-  - 每次 run 結束後儲存 down_proj.state_dict() → .pth（供 probe 使用）
-
-存檔路徑：./output_xlsr_egemaps_dann_finetune_A/xlsr_egemaps_dann_finetune_A_shared_encoder_run_{run_i}.pth
+修正說明：
+  - 修正 CSV 路徑指向 Scenario A
+  - 修正 Output 目錄為 _A
+  - 修正 Alpha 為 0.01 (防止訓練崩潰)
+  - 修正 TrainingArguments 設定 (以 F1 挑選最佳模型)
+  - 修正 F1 score 為 binary
 """
 
 import os
@@ -44,24 +42,24 @@ from sklearn.metrics import (
 )
 
 # ============================================================
-#  設定區
+#  設定區 (已修正為 Scenario A)
 # ============================================================
 TRAIN_CSV  = "./experiment_sisman_scientific/scenario_A_screening/train.csv"
 TEST_CSV   = "./experiment_sisman_scientific/scenario_A_screening/test.csv"
 AUDIO_ROOT = "/export/fs05/hyeh10/depression/daic_5utt_full/merged_5"
 
 MODEL_NAME  = "facebook/wav2vec2-xls-r-300m"
-OUTPUT_DIR  = "./output_xlsr_egemaps_dann_finetune_A"
+OUTPUT_DIR  = "./output_xlsr_egemaps_dann_finetune_A"  # 修正為 A
 EGEMAPS_DIM = 88
 
-SEED             = 103   # 對齊其他 fine-tune 模型
+SEED             = 103
 TOTAL_RUNS       = 1
 NUM_EPOCHS       = 10
-LEARNING_RATE    = 1e-5  # fine-tune 標準 LR
-BATCH_SIZE = 1
-GRAD_ACCUM = 4
-EVAL_STEPS       = 10
-SAVE_STEPS       = 10
+LEARNING_RATE    = 1e-5
+BATCH_SIZE       = 1
+GRAD_ACCUM       = 4
+EVAL_STEPS       = 200
+SAVE_STEPS       = 200
 LOGGING_STEPS    = 10
 SAVE_TOTAL_LIMIT = 2
 FP16             = torch.cuda.is_available()
@@ -102,12 +100,6 @@ class GradientReversalFn(Function):
 #  模型定義（Fine-tune 版：CNN 凍結，Transformer 可訓練）
 # ============================================================
 class XLSR_eGeMaps_DANN_FT(Wav2Vec2PreTrainedModel):
-    """
-    XLS-R (CNN frozen, Transformer trainable) + eGeMAPS concat + DANN
-    - XLS-R mean pooling: 1024 維
-    - eGeMAPS functionals: 88 維
-    - concat → down_proj(256) → dep/spk classifier
-    """
     def __init__(self, config, egemaps_dim: int = EGEMAPS_DIM):
         super().__init__(config)
         self.wav2vec2 = Wav2Vec2Model(config)
@@ -115,10 +107,10 @@ class XLSR_eGeMaps_DANN_FT(Wav2Vec2PreTrainedModel):
         # 只凍結 CNN，Transformer 可訓練
         self.wav2vec2.feature_extractor._freeze_parameters()
 
-        combined_dim = config.hidden_size + egemaps_dim  # 1024 + 88 = 1112
+        combined_dim = config.hidden_size + egemaps_dim
         self.down_proj = nn.Sequential(
             nn.Linear(combined_dim, 256),
-            nn.BatchNorm1d(256),
+            nn.LayerNorm(256),
             nn.ReLU(),
             nn.Dropout(0.3),
         )
@@ -137,7 +129,6 @@ class XLSR_eGeMaps_DANN_FT(Wav2Vec2PreTrainedModel):
         self.wav2vec2.feature_extractor._freeze_parameters()
 
     def get_embedding(self, input_values, egemaps_feat=None, attention_mask=None):
-        """供 probe 使用：回傳 down_proj 後 256 維 embedding"""
         outputs  = self.wav2vec2(input_values, attention_mask=attention_mask, return_dict=True)
         xlsr_feat = torch.mean(outputs.last_hidden_state, dim=1)
         if egemaps_feat is not None:
@@ -194,7 +185,7 @@ class XLSR_eGeMaps_DANN_FT(Wav2Vec2PreTrainedModel):
 
 
 # ============================================================
-#  DataCollator（含 egemaps_feat + speaker_labels）
+#  DataCollator
 # ============================================================
 @dataclass
 class DataCollatorWithEGeMAPSAndSpeaker:
@@ -215,15 +206,17 @@ class DataCollatorWithEGeMAPSAndSpeaker:
 
 
 # ============================================================
-#  compute_metrics
+#  compute_metrics (修正版)
 # ============================================================
 def compute_metrics(p: EvalPrediction):
+    # Fix: 解開 DANN Tuple
     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
     preds = np.argmax(preds, axis=1)
+    
     true_labels = p.label_ids[0] if isinstance(p.label_ids, tuple) or (isinstance(p.label_ids, np.ndarray) and p.label_ids.ndim == 2) else p.label_ids
     return {
         "accuracy": accuracy_score(true_labels, preds),
-        "f1":       f1_score(true_labels, preds, average="macro"),
+        "f1":       f1_score(true_labels, preds, average="binary"), # Fix: 統一用 binary
     }
 
 
@@ -232,18 +225,41 @@ def compute_metrics(p: EvalPrediction):
 # ============================================================
 class CTCTrainer(Trainer):
     def training_step(self, model: nn.Module, inputs: Dict[str, Any]) -> torch.Tensor:
-        total_steps = self.args.max_steps if self.args.max_steps > 0 else (
-            len(self.train_dataset) // (
+        # 1. 計算總訓練步數 (用於控制 Alpha 的成長曲線)
+        if self.args.max_steps > 0:
+            total_steps = self.args.max_steps
+        else:
+            # 估算總 step 數： (資料量 / batch_size) * epochs
+            num_update_steps_per_epoch = len(self.train_dataset) // (
                 self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps
-            ) * int(self.args.num_train_epochs)
-        )
-        p     = float(self.state.global_step) / max(total_steps, 1)
-        alpha = 2.0 / (1.0 + exp(-10.0 * p)) - 1.0
+            )
+            total_steps = num_update_steps_per_epoch * int(self.args.num_train_epochs)
+
+        # 2. 計算當前進度 p (0.0 -> 1.0)
+        current_step = self.state.global_step
+        p = float(current_step) / max(total_steps, 1)
+
+        # ============================================================
+        # 🔑 關鍵修正 (Critical Fix)
+        # ============================================================
+        # 原本公式: alpha 會從 0 成長到 1.0
+        # alpha = 2.0 / (1.0 + exp(-10.0 * p)) - 1.0
+        
+        # 修正後: alpha 會從 0 成長到 0.01
+        # 說明: Speaker Loss 本身數值很大 (~5.0)，必須乘上小係數 (0.01)
+        # 才能讓它與 Depression Loss (~0.7) 保持平衡。
+        alpha = (2.0 / (1.0 + exp(-10.0 * p)) - 1.0) * 0.01
+        
+        # 將 alpha 傳入模型 (這會影響 GradientReversalLayer)
         model._alpha = alpha
 
+        # ============================================================
+        # 3. 標準訓練流程 (Forward + Backward)
+        # ============================================================
         model.train()
         inputs = self._prepare_inputs(inputs)
 
+        # 支援混合精度訓練 (FP16/BF16)
         is_amp = self.args.fp16 or self.args.bf16
         if is_amp:
             with torch.amp.autocast("cuda"):
@@ -251,9 +267,11 @@ class CTCTrainer(Trainer):
         else:
             loss = self.compute_loss(model, inputs)
 
+        # 梯度累積處理
         if self.args.gradient_accumulation_steps > 1:
             loss = loss / self.args.gradient_accumulation_steps
 
+        # 反向傳播 (Backward)
         if is_amp:
             if hasattr(self, "scaler") and self.scaler is not None:
                 self.scaler.scale(loss).backward()
@@ -294,10 +312,10 @@ def load_audio_dataset(csv_path: str, speaker_to_idx: dict = None, is_train: boo
     print(f"📂 讀取 {csv_path}，共 {len(df)} 筆資料")
 
     if is_train and speaker_to_idx is None:
-        # Scenario A：speaker map 從 train 建立（~151 位路人）
-        all_speakers   = sorted(set(extract_speaker_id(p) for p in df["path"].tolist()))
+        # Scenario A：從 TRAIN 建立 Speaker Map
+        all_speakers = sorted(set(extract_speaker_id(p) for p in df["path"].tolist()))
         speaker_to_idx = {spk: idx for idx, spk in enumerate(all_speakers)}
-        print(f"🔍 偵測到 {len(speaker_to_idx)} 位 speaker（train，~151 位路人）")
+        print(f"🔍 偵測到 {len(speaker_to_idx)} 位 speaker（train）")
 
     records = []
     for _, row in df.iterrows():
@@ -309,7 +327,7 @@ def load_audio_dataset(csv_path: str, speaker_to_idx: dict = None, is_train: boo
         records.append({
             "path":           wav_path,
             "label":          LABEL_MAP[raw_label],
-            "speaker_labels": speaker_to_idx.get(spk_str, -1),  # test 陌生人 → -1
+            "speaker_labels": speaker_to_idx.get(spk_str, -1),
         })
 
     dataset = HFDataset.from_dict({
@@ -380,7 +398,7 @@ def full_evaluation(trainer, test_dataset, output_dir, run_i):
     plt.legend(); plt.savefig(os.path.join(results_path, "roc_curve.png")); plt.close()
 
     acc = accuracy_score(y_true, y_pred)
-    f1  = f1_score(y_true, y_pred, average="macro")
+    f1  = f1_score(y_true, y_pred, average="binary")
     print(f"\n🎯 Run {run_i}: Acc={acc:.4f} | F1={f1:.4f} | AUC={roc_auc:.4f}")
     return {"accuracy": acc, "f1": f1, "auc": roc_auc}
 
@@ -390,11 +408,9 @@ def full_evaluation(trainer, test_dataset, output_dir, run_i):
 # ============================================================
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 XLS-R + eGeMAPS + DANN（Fine-tune Transformer）\n"
-          "Spk Map：從 CSV 建立...")
+    print("🚀 XLS-R + eGeMAPS + DANN（Fine-tune Transformer）- Scenario A")
     print("   CNN：凍結 | Transformer：可訓練")
     print(f"   XLS-R：{MODEL_NAME}  eGeMAPS：{EGEMAPS_DIM} 維")
-    print("   down_proj.state_dict() → .pth（供 probe 使用）")
     print("=" * 60)
 
     set_seed(SEED)
@@ -404,7 +420,7 @@ if __name__ == "__main__":
     train_dataset_full, speaker_to_idx = load_audio_dataset(TRAIN_CSV, is_train=True)
     test_dataset_raw, _                = load_audio_dataset(TEST_CSV, speaker_to_idx=speaker_to_idx, is_train=False)
     num_speakers = len(speaker_to_idx)
-    print(f"👥 共 {num_speakers} 位 speaker（train 路人）")
+    print(f"👥 共 {num_speakers} 位 speaker")
 
     print("\n🔊 預處理音訊 + 提取 eGeMAPS（只執行一次，耗時較長）...")
     train_dataset_full = train_dataset_full.map(speech_file_to_array_fn, fn_kwargs={"processor": processor})
@@ -440,7 +456,6 @@ if __name__ == "__main__":
             output_dir=run_output_dir,
             per_device_train_batch_size=BATCH_SIZE,
             label_names=["labels"],
-            
             per_device_eval_batch_size=BATCH_SIZE,
             gradient_accumulation_steps=GRAD_ACCUM,
             evaluation_strategy="steps",
@@ -455,7 +470,8 @@ if __name__ == "__main__":
             seed=SEED + run_i - 1,
             data_seed=SEED + run_i - 1,
             load_best_model_at_end=True,
-            greater_is_better=True,
+            metric_for_best_model="f1",  # 👈 修正：指定以 F1 挑選最佳模型
+            greater_is_better=True,      # 👈 修正：F1 越高越好
             remove_unused_columns=False,
             report_to="none",
         )
@@ -485,7 +501,7 @@ if __name__ == "__main__":
         processor.save_pretrained(best_path)
         print(f"💾 最佳模型儲存至: {best_path}")
 
-        # ★ 儲存 down_proj.state_dict() → .pth（供 probe 使用）
+        # 修正：存檔名為 A
         pth_path = os.path.join(OUTPUT_DIR, f"xlsr_egemaps_dann_finetune_A_shared_encoder_run_{run_i}.pth")
         torch.save(trainer.model.down_proj.state_dict(), pth_path)
         print(f"💾 down_proj 已儲存: {pth_path}")

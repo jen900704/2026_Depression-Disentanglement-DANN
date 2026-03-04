@@ -76,8 +76,8 @@ NUM_EPOCHS = 10
 LEARNING_RATE = 1e-4
 BATCH_SIZE    = 4
 GRAD_ACCUM    = 2
-EVAL_STEPS    = 10   # 對齊論文基準
-SAVE_STEPS    = 10
+EVAL_STEPS       = 200   # 對齊論文基準
+SAVE_STEPS       = 200
 LOGGING_STEPS = 10
 SAVE_TOTAL_LIMIT = 2
 FP16 = torch.cuda.is_available()
@@ -543,14 +543,14 @@ if __name__ == "__main__":
         run_output_dir = os.path.join(OUTPUT_DIR, f"run_{run_i}")
         os.makedirs(run_output_dir, exist_ok=True)
 
-        training_args = TrainingArguments(
+        training_args = TrainingArguments(gradient_checkpointing=True, 
             output_dir=run_output_dir,
             per_device_train_batch_size=BATCH_SIZE,
             label_names=["labels"],
             
             per_device_eval_batch_size=BATCH_SIZE,
             gradient_accumulation_steps=GRAD_ACCUM,
-            evaluation_strategy="steps",
+            eval_strategy="steps",
             num_train_epochs=NUM_EPOCHS,
             fp16=FP16,
             save_steps=SAVE_STEPS,

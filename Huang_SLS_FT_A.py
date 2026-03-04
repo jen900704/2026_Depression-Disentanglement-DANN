@@ -1,5 +1,5 @@
 """
-File — Huang + SLS（無 DANN，Fine-tune Transformer，Scenario B）
+File — Huang + SLS（無 DANN，Fine-tune Transformer，Scenario A）
 ===============================================================
 架構說明：
   - Wav2Vec2 CNN：凍結
@@ -9,14 +9,11 @@ File — Huang + SLS（無 DANN，Fine-tune Transformer，Scenario B）
   - 無 DANN（無 GRL / spk_classifier）
   - Pooling：mean pooling
 
-對齊項目（相對於草稿的修正）：
-  1. run seed：SEED + run_i - 1（103,104,105,106,107），對齊論文基準
-  2. EVAL/SAVE/LOGGING_STEPS：50 → 10，對齊論文基準
-  3. metric_for_best_model：移除「f1」，改用預設 eval_loss，對齊其他模型
-  4. pth 儲存：每 run 存 down_proj.state_dict()，供 probe 腳本使用
-  5. CTCTrainer：改用自定義 CTCTrainer（統一 AMP 處理）
-  6. seed print：列印 run_seed
-  7. gc.collect：保留（節省記憶體，是好設計）
+修正說明：
+  - 修正 Docstring 為 Scenario A
+  - 修正 F1 Score 為 binary
+  - 調整 Batch Size 為 2
+  - 【關鍵修正】將 BatchNorm1d 換成 LayerNorm (防止 BS=1 時崩潰)
 """
 
 import os
@@ -61,13 +58,13 @@ MODEL_NAME = "facebook/wav2vec2-base"
 OUTPUT_DIR = "./output_huang_sls_ft_A"
 
 SEED             = 103
-TOTAL_RUNS       = 5
+TOTAL_RUNS       = 1
 NUM_EPOCHS       = 10
 LEARNING_RATE    = 1e-5   # fine-tune 標準 LR
-BATCH_SIZE       = 4
-GRAD_ACCUM       = 2
-EVAL_STEPS       = 10    # 對齊論文基準（修正 2）
-SAVE_STEPS       = 10
+BATCH_SIZE       = 2      # Huang 模型較小，Batch 2 應該撐得住
+GRAD_ACCUM       = 4      # 總 Batch = 8
+EVAL_STEPS       = 200
+SAVE_STEPS       = 200
 LOGGING_STEPS    = 10
 SAVE_TOTAL_LIMIT = 2
 FP16             = torch.cuda.is_available()
@@ -94,10 +91,6 @@ class SpeechClassifierOutput(ModelOutput):
 class Wav2Vec2_SLS_FT(Wav2Vec2PreTrainedModel):
     """
     Wav2Vec2 + SLS，Fine-tune Transformer，無 DANN
-    - CNN feature extractor：凍結
-    - Transformer encoder：可訓練
-    - SLS 加權融合所有 hidden states（13 層），mean pooling
-    - dep_classifier：binary classification
     """
     def __init__(self, config):
         super().__init__(config)
@@ -111,7 +104,8 @@ class Wav2Vec2_SLS_FT(Wav2Vec2PreTrainedModel):
 
         self.down_proj = nn.Sequential(
             nn.Linear(config.hidden_size, 128),
-            nn.BatchNorm1d(128),
+            # 關鍵修改：改用 LayerNorm，這樣如果需要降 Batch Size 到 1 也不會報錯
+            nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(0.3),
         )
@@ -174,12 +168,12 @@ def compute_metrics(p: EvalPrediction):
     true_labels = p.label_ids[0] if isinstance(p.label_ids, tuple) else p.label_ids
     return {
         "accuracy": accuracy_score(true_labels, preds),
-        "f1":       f1_score(true_labels, preds, average="macro"),
+        "f1":       f1_score(true_labels, preds, average="binary"), 
     }
 
 
 # ============================================================
-#  CTCTrainer（統一 AMP 處理，對齊其他模型，修正 5）
+#  CTCTrainer（統一 AMP 處理）
 # ============================================================
 if version.parse(torch.__version__) >= version.parse("1.6"):
     _is_native_amp_available = True
@@ -235,6 +229,7 @@ def load_audio_dataset(csv_path: str):
 
 
 def speech_file_to_array_fn(batch, processor):
+    wav_path = batch["path"]
     speech, sr = torchaudio.load(batch["path"])
     if speech.shape[0] > 1:
         speech = torch.mean(speech, dim=0, keepdim=True)
@@ -285,11 +280,11 @@ def full_evaluation(trainer, test_dataset, output_dir, run_i):
     plt.plot([0, 1], [0, 1], color="navy", lw=2, linestyle="--")
     plt.xlim([0, 1]); plt.ylim([0, 1.05])
     plt.xlabel("FPR"); plt.ylabel("TPR")
-    plt.title(f"ROC - Huang+SLS Scenario B Run {run_i}")
+    plt.title(f"ROC - Huang+SLS Scenario A Run {run_i}")
     plt.legend(); plt.savefig(os.path.join(results_path, "roc_curve.png")); plt.close()
 
     acc = accuracy_score(y_true, y_pred)
-    f1  = f1_score(y_true, y_pred, average="macro")
+    f1  = f1_score(y_true, y_pred, average="binary")
     print(f"\n🎯 Run {run_i}: Acc={acc:.4f} | F1={f1:.4f} | AUC={roc_auc:.4f}")
     return {"accuracy": acc, "f1": f1, "auc": roc_auc}
 
@@ -299,7 +294,7 @@ def full_evaluation(trainer, test_dataset, output_dir, run_i):
 # ============================================================
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 Huang + SLS（無 DANN，Fine-tune Transformer）— Scenario B")
+    print("🚀 Huang + SLS（無 DANN，Fine-tune Transformer）— Scenario A")
     print("   CNN：凍結 | Transformer：可訓練 | 無 DANN | Pooling：mean")
     print(f"   SEED={SEED} | LR={LEARNING_RATE} | Epochs={NUM_EPOCHS} | Runs={TOTAL_RUNS}")
     print("=" * 60)
@@ -324,7 +319,6 @@ if __name__ == "__main__":
         print(f"🎬 Run {run_i} / {TOTAL_RUNS}")
         print(f"{'='*60}")
 
-        # seed 103, 104, 105, 106, 107 — 對齊論文基準（修正 1）
         run_seed = SEED + run_i - 1
         set_seed(run_seed)
         print(f"🎲 Run {run_i} seed: {run_seed}")
@@ -344,12 +338,12 @@ if __name__ == "__main__":
         run_output_dir = os.path.join(OUTPUT_DIR, f"run_{run_i}")
         os.makedirs(run_output_dir, exist_ok=True)
 
-        training_args = TrainingArguments(
+        training_args = TrainingArguments(gradient_checkpointing=True, 
             output_dir=run_output_dir,
             per_device_train_batch_size=BATCH_SIZE,
             per_device_eval_batch_size=BATCH_SIZE,
             gradient_accumulation_steps=GRAD_ACCUM,
-            evaluation_strategy="steps",
+            evaluation_strategy="steps",  
             num_train_epochs=NUM_EPOCHS,
             fp16=FP16,
             save_steps=SAVE_STEPS,
@@ -360,12 +354,11 @@ if __name__ == "__main__":
             seed=run_seed,
             data_seed=run_seed,
             load_best_model_at_end=True,
-            # metric_for_best_model 未設定 → 預設 eval_loss，對齊論文（修正 3）
             report_to="none",
             remove_unused_columns=False,
         )
 
-        trainer = CTCTrainer(                        # 修正 5：CTCTrainer
+        trainer = CTCTrainer(
             model=model,
             data_collator=DataCollatorSpeech(processor=processor),
             args=training_args,
@@ -389,7 +382,7 @@ if __name__ == "__main__":
         processor.save_pretrained(best_path)
         print(f"💾 最佳模型儲存至: {best_path}")
 
-        # ── 儲存 down_proj .pth（供 probe 腳本使用，修正 4）───────
+        # ── 儲存 down_proj .pth
         pth_path = os.path.join(OUTPUT_DIR, f"sls_ft_A_shared_encoder_run_{run_i}.pth")
         torch.save(trainer.model.down_proj.state_dict(), pth_path)
         print(f"🔑 down_proj .pth 儲存至: {pth_path}")
@@ -399,11 +392,11 @@ if __name__ == "__main__":
         all_results.append(results)
         print(f"Run {run_i} → Acc: {results['accuracy']:.4f} | F1: {results['f1']:.4f} | AUC: {results['auc']:.4f}")
 
-        del model, trainer; torch.cuda.empty_cache(); gc.collect()  # 節省記憶體
+        del model, trainer; torch.cuda.empty_cache(); gc.collect()
 
     # ── 跨 run 統計 ──────────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"📈 Scenario B Huang+SLS — {TOTAL_RUNS} 次實驗彙總")
+    print(f"📈 Scenario A Huang+SLS — {TOTAL_RUNS} 次實驗彙總")
     print(f"{'='*60}")
     if all_results:
         results_df = pd.DataFrame(all_results)
@@ -415,4 +408,4 @@ if __name__ == "__main__":
         results_df.to_csv(os.path.join(OUTPUT_DIR, "summary_5runs.csv"), index=False)
         print(f"\n✅ 彙總已儲存至 {OUTPUT_DIR}/summary_5runs.csv")
 
-    print("\n🏁 Scenario B 完成！")
+    print("\n🏁 Scenario A 完成！")

@@ -49,13 +49,13 @@ MODEL_NAME = "facebook/wav2vec2-base"
 OUTPUT_DIR = "./output_huang_sls_A"
 
 SEED             = 103
-TOTAL_RUNS       = 5
+TOTAL_RUNS       = 1
 NUM_EPOCHS       = 10
 LEARNING_RATE    = 1e-4
 BATCH_SIZE       = 4
 GRAD_ACCUM       = 2
-EVAL_STEPS       = 10
-SAVE_STEPS       = 10
+EVAL_STEPS       = 200
+SAVE_STEPS       = 200
 LOGGING_STEPS    = 10
 SAVE_TOTAL_LIMIT = 2
 FP16             = torch.cuda.is_available()
@@ -292,7 +292,7 @@ if __name__ == "__main__":
         run_output_dir = os.path.join(OUTPUT_DIR, f"run_{run_i}")
         os.makedirs(run_output_dir, exist_ok=True)
 
-        training_args = TrainingArguments(
+        training_args = TrainingArguments(gradient_checkpointing=True, 
             output_dir=run_output_dir,
             per_device_train_batch_size=BATCH_SIZE,
             per_device_eval_batch_size=BATCH_SIZE,

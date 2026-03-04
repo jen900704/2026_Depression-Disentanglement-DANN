@@ -1,0 +1,18 @@
+idx,label,key,scenario,valid_runs,spk_acc_mean,spk_acc_std
+1,G1 | Original | Frozen Wav2Vec2 | A,G1_Orig_Frozen_A,A,1,0.0,0.0
+2,G1 | Original | Frozen Wav2Vec2 | B,G1_Orig_Frozen_B,B,1,0.9594,0.0
+4,G1 | Original | Fine-tuned W2V  | B,G1_Orig_FT_B,B,1,0.8697,0.0
+9,G2 | Original | Frozen Wav2Vec2 | A,G2_Orig_Frozen_A,A,1,0.0,0.0
+10,G2 | Original | Frozen Wav2Vec2 | B,G2_Orig_Frozen_B,B,1,0.9622,0.0
+11,G2 | Original | Fine-tuned W2V  | A,G2_Orig_FT_A,A,1,0.0,0.0
+12,G2 | Original | Fine-tuned W2V  | B,G2_Orig_FT_B,B,1,0.9496,0.0
+13,G2 | DANN     | Frozen Wav2Vec2 | A,G2_DANN_Frozen_A,A,1,0.0,0.0
+14,G2 | DANN     | Frozen Wav2Vec2 | B,G2_DANN_Frozen_B,B,1,0.8936,0.0
+15,G2 | DANN     | Fine-tuned W2V  | A,G2_DANN_FT_A,A,1,0.0,0.0
+16,G2 | DANN     | Fine-tuned W2V  | B,G2_DANN_FT_B,B,1,0.8866,0.0
+17,G3 | Original | Frozen XLS-R    | A,G3_Orig_Frozen_A,A,1,0.0,0.0
+18,G3 | Original | Frozen XLS-R    | B,G3_Orig_Frozen_B,B,1,0.0826,0.0
+21,G3 | DANN     | Frozen XLS-R    | A,G3_DANN_Frozen_A,A,1,0.0,0.0
+22,G3 | DANN     | Frozen XLS-R    | B,G3_DANN_Frozen_B,B,1,0.0616,0.0
+23,G3 | DANN     | Fine-tuned XLSR | A,G3_DANN_FT_A,A,1,0.0,0.0
+24,G3 | DANN     | Fine-tuned XLSR | B,G3_DANN_FT_B,B,1,0.1036,0.0

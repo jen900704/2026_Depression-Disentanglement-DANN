@@ -7,6 +7,11 @@ XLS-R + eGeMAPS（無 DANN，無 fine-tune，Scenario A）
   - eGeMAPS (opensmile, eGeMAPSv02 Functionals)：88 維
   - 特徵拼接後 → down_proj(256) → dep_classifier (binary)
   - 無 DANN（移除 GRL 和 spk_classifier）
+
+修正說明：
+  - Batch Size 降為 1 (防 OOM)
+  - Gradient Accumulation 升為 16 (維持總效能)
+  - 語法與路徑確認無誤
 """
 
 import os
@@ -52,13 +57,13 @@ OUTPUT_DIR  = "./output_xlsr_egemaps_A"
 EGEMAPS_DIM = 88
 
 SEED             = 103
-TOTAL_RUNS       = 5
+TOTAL_RUNS       = 1
 NUM_EPOCHS       = 10
 LEARNING_RATE    = 1e-4
-BATCH_SIZE       = 2
-GRAD_ACCUM       = 8
-EVAL_STEPS       = 10
-SAVE_STEPS       = 10
+BATCH_SIZE       = 1      # 修正：降為 1 以防 OOM (參考 XL_Orig_B 的教訓)
+GRAD_ACCUM       = 16     # 修正：補償 Batch Size
+EVAL_STEPS       = 200
+SAVE_STEPS       = 200
 LOGGING_STEPS    = 10
 SAVE_TOTAL_LIMIT = 2
 FP16             = torch.cuda.is_available()
@@ -80,7 +85,7 @@ SMILE = opensmile.Smile(
 class SpeechClassifierOutput(ModelOutput):
     loss:          Optional[torch.FloatTensor]          = None
     logits:        torch.FloatTensor                    = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]]  = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]]   = None
     attentions:    Optional[Tuple[torch.FloatTensor]]   = None
 
 
@@ -105,7 +110,7 @@ class XLSR_eGeMaps(Wav2Vec2PreTrainedModel):
         combined_dim = config.hidden_size + egemaps_dim  # 1024 + 88 = 1112
         self.down_proj = nn.Sequential(
             nn.Linear(combined_dim, 256),
-            nn.BatchNorm1d(256),
+            nn.LayerNorm(256),
             nn.ReLU(),
             nn.Dropout(0.3),
         )
@@ -167,12 +172,16 @@ class DataCollatorWithEGeMAPS:
 #  compute_metrics
 # ============================================================
 def compute_metrics(p: EvalPrediction):
+    # Tuple 解包防呆
     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
     preds = np.argmax(preds, axis=1)
+    
     true_labels = p.label_ids[0] if isinstance(p.label_ids, tuple) else p.label_ids
+    
     return {
         "accuracy": accuracy_score(true_labels, preds),
-        "f1":       f1_score(true_labels, preds, average="macro"),
+        # 修正：對齊 DANN 使用 binary
+        "f1":       f1_score(true_labels, preds, average="binary"),
     }
 
 
@@ -277,7 +286,7 @@ def full_evaluation(trainer, test_dataset, output_dir, run_i):
     plt.legend(); plt.savefig(os.path.join(results_path, "roc_curve.png")); plt.close()
 
     acc = accuracy_score(y_true, y_pred)
-    f1  = f1_score(y_true, y_pred, average="macro")
+    f1  = f1_score(y_true, y_pred, average="binary")
     print(f"\n🎯 Run {run_i}: Acc={acc:.4f} | F1={f1:.4f} | AUC={roc_auc:.4f}")
     return {"accuracy": acc, "f1": f1, "auc": roc_auc}
 
@@ -324,7 +333,7 @@ if __name__ == "__main__":
         run_output_dir = os.path.join(OUTPUT_DIR, f"run_{run_i}")
         os.makedirs(run_output_dir, exist_ok=True)
 
-        training_args = TrainingArguments(
+        training_args = TrainingArguments(gradient_checkpointing=True, 
             output_dir=run_output_dir,
             per_device_train_batch_size=BATCH_SIZE,
             per_device_eval_batch_size=BATCH_SIZE,
@@ -338,7 +347,6 @@ if __name__ == "__main__":
             learning_rate=LEARNING_RATE,
             save_total_limit=SAVE_TOTAL_LIMIT,
             label_names=["labels"],
-            dataloader_drop_last=True,
             seed=run_seed,
             data_seed=run_seed,
             load_best_model_at_end=True,

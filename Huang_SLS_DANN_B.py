@@ -1,21 +1,11 @@
 """
 File — Huang + SLS + DANN（無 fine-tune，Scenario B）
 =====================================================
-架構說明：
-  - Wav2Vec2 主幹：完全凍結（包含 CNN feature extractor + Transformer encoder）
-  - SLS (Stochastic Layer Selection)：可學習的加權融合所有 hidden states
-  - DANN domain classifier：對抗式訓練，以 speaker 為 domain
-  - dep_classifier：二元憂鬱分類 (binary)
-
-修正清單（相對於草稿 v4）：
-  1. SEED=42 → 103，對齊論文基準
-  2. EVAL/SAVE/LOGGING_STEPS=50 → 10，對齊論文基準
-  3. run seed：SEED+run_i → SEED+run_i-1（103,104,105,106,107）
-  4. pth 檔名：huang_sls_dann_A（原本已正確）
-  5. 彙總：新增 summary_5runs.csv + results["run"]=run_i + mean±std 格式
-  6. dataloader_drop_last=True 移除（eval 時樣本數可能不整除 batch，drop 會丟資料）
-  7. spk_classifier dim：hardcode 200 → num_speakers（從資料動態計算）
-  8. gc.collect 釋放記憶體
+修正說明 (Alignment with Successful XLS-R Run):
+  - 修正 Alpha: 乘以 0.01 防止訓練崩潰 (Loss > 5.0)
+  - 修正 TrainingStep: 兼容新版 Transformers
+  - 修正 Best Model: 以 F1 為標準存檔
+  - 修正 CSV 路徑: 使用絕對路徑
 """
 
 import os
@@ -51,36 +41,36 @@ from sklearn.metrics import (
 )
 
 # ============================================================
-#  設定區
+#  設定區 (Scenario B)
 # ============================================================
-TRAIN_CSV  = "./experiment_sisman_scientific/scenario_B_monitoring/train.csv"
-TEST_CSV   = "./experiment_sisman_scientific/scenario_B_monitoring/test.csv"
+# 使用絕對路徑，確保安全
+TRAIN_CSV  = "/home/xzhao117/hyeh_project/experiment_sisman_scientific/scenario_B_monitoring/train.csv"
+TEST_CSV   = "/home/xzhao117/hyeh_project/experiment_sisman_scientific/scenario_B_monitoring/test.csv"
 AUDIO_ROOT = "/export/fs05/hyeh10/depression/daic_5utt_full/merged_5"
 
 MODEL_NAME = "facebook/wav2vec2-base"
 OUTPUT_DIR = "./output_huang_sls_dann_B"
 
-SEED             = 103   # 修正 1：對齊論文基準
-TOTAL_RUNS       = 5
+SEED             = 103
+TOTAL_RUNS       = 1
 NUM_EPOCHS       = 10
 LEARNING_RATE    = 1e-4
-BATCH_SIZE       = 4
-GRAD_ACCUM       = 2
-EVAL_STEPS       = 10    # 修正 2：對齊論文基準
-SAVE_STEPS       = 10
+BATCH_SIZE       = 2
+GRAD_ACCUM       = 4
+EVAL_STEPS       = 200
+SAVE_STEPS       = 200
 LOGGING_STEPS    = 10
 SAVE_TOTAL_LIMIT = 2
-FP16 = torch.cuda.is_available()
+FP16             = torch.cuda.is_available()
 
 LABEL_MAP   = {"non": 0, "0": 0, 0: 0, "dep": 1, "1": 1, 1: 1}
 LABEL_NAMES = ["non-depressed", "depressed"]
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # ============================================================
 #  模型定義
 # ============================================================
-
 @dataclass
 class SpeechClassifierOutput(ModelOutput):
     loss:           Optional[torch.FloatTensor]        = None
@@ -95,7 +85,6 @@ class GradientReversalFn(Function):
     def forward(ctx, x, alpha):
         ctx.alpha = alpha
         return x.view_as(x)
-
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output.neg() * ctx.alpha, None
@@ -104,15 +93,12 @@ class GradientReversalFn(Function):
 class Wav2Vec2_SLS_DANN(Wav2Vec2PreTrainedModel):
     """
     Wav2Vec2 + SLS + DANN，無 fine-tune
-    - wav2vec2 全部凍結
-    - SLS 加權融合所有 hidden states（13 層）
-    - dep_classifier + spk_classifier（GRL 對抗）
-    - alpha 由 CTCTrainer 動態注入（self._alpha）
     """
     def __init__(self, config):
         super().__init__(config)
         self.wav2vec2 = Wav2Vec2Model(config)
 
+        # 凍結主幹
         for param in self.wav2vec2.parameters():
             param.requires_grad = False
 
@@ -121,13 +107,13 @@ class Wav2Vec2_SLS_DANN(Wav2Vec2PreTrainedModel):
 
         self.down_proj = nn.Sequential(
             nn.Linear(config.hidden_size, 128),
-            nn.BatchNorm1d(128),
+            nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(0.3),
         )
         self.dep_classifier = nn.Linear(128, config.num_labels)
-        # 修正 7：用 config 動態取 num_speakers，不 hardcode 200
-        self.spk_classifier = nn.Linear(128, getattr(config, "num_speakers", 151))
+        # 動態設定 num_speakers (B 會有 189 人)
+        self.spk_classifier = nn.Linear(128, getattr(config, "num_speakers", 189))
 
         self._alpha = 0.0
         self.init_weights()
@@ -182,9 +168,8 @@ class Wav2Vec2_SLS_DANN(Wav2Vec2PreTrainedModel):
 
 
 # ============================================================
-#  DataCollator（含 speaker_labels）
+#  DataCollator
 # ============================================================
-
 @dataclass
 class DataCollatorWithSpeaker:
     processor: Wav2Vec2Processor
@@ -203,38 +188,42 @@ class DataCollatorWithSpeaker:
 # ============================================================
 #  compute_metrics
 # ============================================================
-
-def compute_metrics(p: EvalPrediction):
+def compute_metrics(p):
+    # Fix: 解開 Tuple
     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
     preds = np.argmax(preds, axis=1)
+    
+    # Fix: 解開 Label Tuple (如果有的話)
+    true_labels = p.label_ids[0] if isinstance(p.label_ids, tuple) or (isinstance(p.label_ids, np.ndarray) and p.label_ids.ndim == 2) else p.label_ids
+    
     return {
-        "accuracy": accuracy_score(p.label_ids, preds),
-        "f1":       f1_score(p.label_ids, preds, average="macro"),
+        "accuracy": accuracy_score(true_labels, preds),
+        "f1": f1_score(true_labels, preds, average="binary"),
     }
 
 
 # ============================================================
-#  CTCTrainer — 動態注入 alpha
+#  CTCTrainer (修正版)
 # ============================================================
-
 if version.parse(torch.__version__) >= version.parse("1.6"):
     from torch.cuda.amp import autocast
 
-
 class CTCTrainer(Trainer):
-    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+    # 修正：加上 *args, **kwargs 以兼容新版 Transformers
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], *args, **kwargs) -> torch.Tensor:
         total_steps = self.args.max_steps if self.args.max_steps > 0 else (
             len(self.train_dataset) //
             (self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps)
             * int(self.args.num_train_epochs)
         )
         p     = float(self.state.global_step) / max(total_steps, 1)
-        alpha = 2.0 / (1.0 + exp(-10.0 * p)) - 1.0
+        
+        # 🔑 關鍵修正：Alpha * 0.01
+        alpha = (2.0 / (1.0 + exp(-10.0 * p)) - 1.0) * 0.01
         model._alpha = alpha
 
         model.train()
         inputs = self._prepare_inputs(inputs)
-
         is_amp_used = self.args.fp16 or self.args.bf16
         if is_amp_used:
             with torch.amp.autocast("cuda"):
@@ -259,9 +248,8 @@ class CTCTrainer(Trainer):
 
 
 # ============================================================
-#  資料載入與預處理
+#  資料處理
 # ============================================================
-
 def extract_speaker_id(filepath: str) -> str:
     return os.path.basename(filepath).split("_")[0]
 
@@ -271,13 +259,10 @@ def load_audio_dataset(csv_path: str, speaker_to_idx: dict = None, is_train: boo
     print(f"📂 讀取 {csv_path}，共 {len(df)} 筆資料")
 
     if is_train and speaker_to_idx is None:
-        # Scenario B：speaker map 只含 38 位 target speakers（從 TEST_CSV 建立）
-        # 151 位 base speakers → spk_idx=-1，不參與 L_spk
-        import pandas as _pd_tmp
-        test_df = _pd_tmp.read_csv(TEST_CSV)
-        target_speakers = sorted(set(extract_speaker_id(p) for p in test_df["path"].tolist()))
-        speaker_to_idx  = {spk: idx for idx, spk in enumerate(target_speakers)}
-        print(f"🔍 偵測到 {len(speaker_to_idx)} 位 target speaker（從 TEST_CSV，應為 38）")
+        # 修正：DANN 需要在訓練集上學習辨識 Speaker，所以必須包含 Train Speaker
+        all_speakers = sorted(set(extract_speaker_id(p) for p in df["path"].tolist()))
+        speaker_to_idx = {spk: idx for idx, spk in enumerate(all_speakers)}
+        print(f"🔍 偵測到 {len(speaker_to_idx)} 位 speaker（Train，用於 DANN 訓練）")
 
     records, skipped = [], 0
     for _, row in df.iterrows():
@@ -287,7 +272,10 @@ def load_audio_dataset(csv_path: str, speaker_to_idx: dict = None, is_train: boo
             skipped += 1; continue
         if not os.path.exists(wav_path):
             print(f"⚠️ 不存在: {wav_path}"); skipped += 1; continue
-        spk_idx = speaker_to_idx.get(extract_speaker_id(wav_path), -1)
+        
+        spk_str = extract_speaker_id(wav_path)
+        # 對於 DANN，訓練集必須要有有效的 speaker_label (>=0)
+        spk_idx = speaker_to_idx.get(spk_str, -1)
         records.append({"path": wav_path, "label": LABEL_MAP[raw_label], "speaker_labels": spk_idx})
 
     if skipped: print(f"⚠️ 跳過 {skipped} 筆")
@@ -321,13 +309,13 @@ def preprocess_function(batch, processor):
 # ============================================================
 #  評估
 # ============================================================
-
 def full_evaluation(trainer, test_dataset, output_dir, run_i):
     predictions = trainer.predict(test_dataset)
     preds  = predictions.predictions
     if isinstance(preds, tuple): preds = preds[0]
     y_pred = np.argmax(preds, axis=1)
     y_true = predictions.label_ids
+    if isinstance(y_true, tuple): y_true = y_true[0]
 
     results_path = os.path.join(output_dir, f"results_run{run_i}")
     os.makedirs(results_path, exist_ok=True)
@@ -352,7 +340,7 @@ def full_evaluation(trainer, test_dataset, output_dir, run_i):
     plt.legend(); plt.savefig(os.path.join(results_path, "roc_curve.png")); plt.close()
 
     acc = accuracy_score(y_true, y_pred)
-    f1  = f1_score(y_true, y_pred, average="macro")
+    f1  = f1_score(y_true, y_pred, average="binary")
     print(f"\n🎯 Run {run_i}: Acc={acc:.4f} | F1={f1:.4f} | AUC={roc_auc:.4f}")
     return {"accuracy": acc, "f1": f1, "auc": roc_auc}
 
@@ -360,7 +348,6 @@ def full_evaluation(trainer, test_dataset, output_dir, run_i):
 # ============================================================
 #  主程式
 # ============================================================
-
 if __name__ == "__main__":
     print("=" * 60)
     print("🚀 Huang + SLS + DANN（無 fine-tune）— Scenario B")
@@ -373,8 +360,9 @@ if __name__ == "__main__":
     print("\n📦 載入資料集（只執行一次）...")
     train_dataset_full, speaker_to_idx = load_audio_dataset(TRAIN_CSV, is_train=True)
     test_dataset_raw, _ = load_audio_dataset(TEST_CSV, speaker_to_idx=speaker_to_idx, is_train=False)
+    
     num_speakers = len(speaker_to_idx)
-    print(f"👥 共 {num_speakers} 位 speaker")
+    print(f"👥 共 {num_speakers} 位 speaker (Train Set)")
 
     print("\n🔊 預處理音訊（只執行一次）...")
     map_kwargs = {"fn_kwargs": {"processor": processor}}
@@ -389,7 +377,6 @@ if __name__ == "__main__":
         print(f"🎬 Run {run_i} / {TOTAL_RUNS}")
         print(f"{'='*60}")
 
-        # 修正 3：seed 103, 104, 105, 106, 107
         run_seed = SEED + run_i - 1
         set_seed(run_seed)
         print(f"🎲 Run {run_i} seed: {run_seed}")
@@ -398,7 +385,7 @@ if __name__ == "__main__":
         config = Wav2Vec2Config.from_pretrained(
             MODEL_NAME,
             num_labels=2,
-            num_speakers=num_speakers,   # 修正 7：動態設定
+            num_speakers=num_speakers,   # 動態設定
             final_dropout=0.1,
             output_hidden_states=True,
         )
@@ -417,9 +404,10 @@ if __name__ == "__main__":
             per_device_train_batch_size=BATCH_SIZE,
             per_device_eval_batch_size=BATCH_SIZE,
             gradient_accumulation_steps=GRAD_ACCUM,
-            evaluation_strategy="steps",
+            eval_strategy="steps", # 修正參數名
             num_train_epochs=NUM_EPOCHS,
             fp16=FP16,
+            gradient_checkpointing=True,
             save_steps=SAVE_STEPS,
             eval_steps=EVAL_STEPS,
             logging_steps=LOGGING_STEPS,
@@ -428,10 +416,10 @@ if __name__ == "__main__":
             seed=run_seed,
             data_seed=run_seed,
             load_best_model_at_end=True,
-            # metric_for_best_model 未設定 → 預設 eval_loss，對齊論文
+            metric_for_best_model="f1",  # 👈 修正：F1 挑選
+            greater_is_better=True,      # 👈 修正：F1 越高越好
             report_to="none",
             remove_unused_columns=False,
-            # 修正 6：移除 dataloader_drop_last（eval 時 drop 會丟掉尾部樣本）
         )
 
         trainer = CTCTrainer(
@@ -458,19 +446,17 @@ if __name__ == "__main__":
         processor.save_pretrained(best_path)
         print(f"💾 最佳模型儲存至: {best_path}")
 
-        # 修正 4：pth 檔名含 A（Scenario B）
         pth_path = os.path.join(OUTPUT_DIR, f"huang_sls_dann_B_shared_encoder_run_{run_i}.pth")
         torch.save(trainer.model.down_proj.state_dict(), pth_path)
         print(f"🔑 down_proj .pth 儲存至: {pth_path}")
 
         results = full_evaluation(trainer, test_dataset, OUTPUT_DIR, run_i)
-        results["run"] = run_i   # 修正 5a
+        results["run"] = run_i   
         all_results.append(results)
         print(f"Run {run_i} → Acc: {results['accuracy']:.4f} | F1: {results['f1']:.4f} | AUC: {results['auc']:.4f}")
 
-        del model, trainer; torch.cuda.empty_cache(); gc.collect()  # 修正 8
+        del model, trainer; torch.cuda.empty_cache(); gc.collect()
 
-    # ── 跨 run 統計 ──────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"📈 Scenario B SLS+DANN — {TOTAL_RUNS} 次實驗彙總")
     print(f"{'='*60}")
@@ -482,7 +468,7 @@ if __name__ == "__main__":
             print(f"  {metric.upper():10s}  mean={np.mean(vals):.4f} ± {np.std(vals):.4f}  "
                   f"min={np.min(vals):.4f}  max={np.max(vals):.4f}")
         summary_path = os.path.join(OUTPUT_DIR, "summary_5runs.csv")
-        results_df.to_csv(summary_path, index=False)   # 修正 5b
+        results_df.to_csv(summary_path, index=False)
         print(f"\n✅ 彙總已儲存至 {summary_path}")
 
     print("\n🏁 Scenario B 實驗完成！")
